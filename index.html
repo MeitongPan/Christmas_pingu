@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交互式 Pingu 照相机 (网络优化版)</title>
+    <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        /* 页面基础样式 */
+        body { 
+            margin: 0; padding: 0; overflow: hidden; 
+            font-family: 'Segoe UI', sans-serif; 
+            height: 100vh;
+            display: flex; justify-content: center; align-items: flex-end;   
+            background-image: url('bg_christmas.png'); 
+            background-size: cover; background-position: center bottom; background-repeat: no-repeat;
+            box-shadow: inset 0 0 0 1000px rgba(0,0,0,0.2);
+        }
+
+        /* 摄像头小窗口 */
+        #video-container { 
+            position: absolute; top: 20px; right: 20px; 
+            width: 320px; height: 240px; 
+            border-radius: 15px; overflow: hidden;
+            border: 4px solid white;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+            z-index: 100; background: #000;
+        }
+        video, #output_canvas { 
+            width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); 
+        }
+        
+        /* Pingu 容器 */
+        #pingu-container {
+            position: relative; 
+            width: auto; height: 90vh;
+            display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+            padding-bottom: 5vh;
+            transform-origin: bottom center;
+            animation: breathe 2s ease-in-out infinite; 
+            transition: transform 3s linear; 
+            z-index: 10;
+        }
+
+        /* 禁止动画类 */
+        .no-transition { transition: none !important; }
+
+        /* Pingu 图片 */
+        #pingu-character {
+            height: 100%; width: auto; max-width: 90vw;
+            filter: drop-shadow(0 10px 20px rgba(0,0,0,0.3));
+            transition: transform 0.2s; /* 默认过渡 */
+            object-fit: contain;
+            position: relative;
+            z-index: 2; /* Pingu 在三脚架前面 */
+        }
+
+        /* 留在原地的三脚架图片 */
+        #stationary-tripod {
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            height: 100%; 
+            width: auto;
+            z-index: 1; /* 在 Pingu 后面 */
+            display: none; /* 默认隐藏 */
+            filter: drop-shadow(0 10px 20px rgba(0,0,0,0.3));
+        }
+        
+        /* --- 对话气泡样式 --- */
+        #bubble {
+            background: white; 
+            padding: 15px 25px; 
+            border-radius: 20px; 
+            position: fixed; 
+            top: 70px;  
+            left: 20px; 
+            width: auto; 
+            max-width: 300px; 
+            font-size: 21px; 
+            font-weight: bold; 
+            color: #333;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
+            opacity: 0; transition: opacity 0.5s;
+            z-index: 50; 
+            text-align: left; 
+        }
+        #bubble::after {
+            content: ''; position: absolute; 
+            top: 100%; 
+            left: 30px; 
+            border-width: 15px 15px 0 0; 
+            border-style: solid; 
+            border-color: white transparent transparent transparent;
+        }
+
+        /* 状态文字 */
+        #status { 
+            position: absolute; top: 20px; left: 20px; 
+            color: #555; background: rgba(255,255,255,0.8); 
+            padding: 8px 15px; border-radius: 20px; font-size: 14px;
+        }
+        
+        /* 动画关键帧 */
+        @keyframes breathe {
+            0% { transform: scale(1, 1); }
+            50% { transform: scale(1.02, 0.98); }
+            100% { transform: scale(1, 1); }
+        }
+        @keyframes wave-anim {
+            0% { transform: rotate(0deg); }
+            25% { transform: rotate(-5deg); }
+            75% { transform: rotate(5deg); }
+            100% { transform: rotate(0deg); }
+        }
+        .waving { animation: wave-anim 1s infinite !important; }
+
+        .stop-breathing { animation: none !important; }
+
+        /* 照片结果遮罩层 */
+        #photo-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); display: none;
+            justify-content: center; align-items: center; flex-direction: column; z-index: 200;
+        }
+        #result-photo { 
+            border: 10px solid white; max-width: 80%; max-height: 80%; 
+            border-radius: 10px; transform: scaleX(-1); 
+            box-shadow: 0 0 50px rgba(0,0,0,0.5); 
+        }
+        .overlay-content { display: flex; flex-direction: column; align-items: center; }
+        .btn-group { margin-top: 20px; display: flex; }
+        button { 
+            padding: 12px 30px; font-size: 18px; cursor: pointer; margin: 0 10px; 
+            border: none; border-radius: 50px; background: white; color: #333; font-weight: bold;
+            transition: transform 0.1s;
+        }
+        button:active { transform: scale(0.95); }
+        button:hover { background: #f0f0f0; }
+    </style>
+</head>
+<body>
+
+    <div id="video-container">
+        <video id="input_video" autoplay playsinline muted></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <div id="pingu-container">
+        <img id="pingu-character" src="pingu_idle.png" alt="Pingu">
+        <img id="stationary-tripod" src="tripod_only.png" alt="Tripod"> 
+    </div>
+
+    <div id="bubble">...</div>
+
+    <div id="status">正在加载 AI 模型...</div>
+
+    <div id="photo-overlay">
+        <div class="overlay-content">
+            <img id="result-photo" src="">
+            <div class="btn-group">
+                <button onclick="downloadPhoto()">💾 保存照片</button>
+                <button onclick="resetApp()">🔄 再拍一张</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. 变量与配置
+        // ==========================================
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const pinguChar = document.getElementById('pingu-character');
+        const stationaryTripod = document.getElementById('stationary-tripod');
+        const bubble = document.getElementById('bubble');
+        const statusDiv = document.getElementById('status');
+        const pinguContainer = document.getElementById('pingu-container');
+        
+        let currentState = "LOADING"; 
+    
+        let waveCount = 0;
+        let lastWristX = 0;
+        let okGestureCount = 0;
+        
+        // 点头摇头的连续计数器
+        let nodFrameCount = 0;
+        let shakeFrameCount = 0;
+        const requiredGestureFrames = 5; // 需要连续 5 帧检测到动作才触发
+
+        // 音频变量
+        let cryAudio = new Audio('cry.mp3'); 
+        cryAudio.loop = true; 
+        
+        let christmasAudio = new Audio('merry_christmas.mp3'); 
+        christmasAudio.loop = true; 
+        
+        let cheerAudio = new Audio('cheer.mp3');
+
+        let currentMainAudio = null; 
+        
+        // 动画控制变量
+        let cryInterval = null; 
+        let walkInterval = null; 
+        let canRecoverFromCry = false; 
+
+        // 头部动作检测变量
+        let noseHistory = []; 
+        const historyMaxLength = 10; 
+        let headGestureCooldown = false; 
+
+        // 关键流程定时器
+        let performanceTimeout = null; 
+        let cryRecoveryTimeout = null; 
+        let happyEndTimeout = null; 
+        let sequenceTimeout = null; 
+
+        // ==========================================
+        // 2. 语音与基础功能
+        // ==========================================
+        function speak(text) {
+            bubble.innerText = text;
+            bubble.style.opacity = 1;
+            let audio = new Audio('noot.mp3');
+            audio.volume = 0.8; 
+            audio.play().catch(e => console.log("等待交互播放声音"));
+        }
+
+        function showPhotoOverlay() {
+            const overlay = document.getElementById('photo-overlay');
+            overlay.style.display = 'flex';
+            overlay.querySelector('.overlay-content').style.display = 'flex';
+            bubble.style.opacity = 0; 
+        }
+
+        // ==========================================
+        // 3. 核心检测循环 (Pose)
+        // ==========================================
+        function onResults(results) {
+            // 一旦有结果，说明 AI 在运行，更新状态
+            if(currentState === "LOADING") {
+                statusDiv.innerText = "AI 运行中 | 等待挥手";
+            }
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // 绘制画面
+            if (results.image) {
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            }
+            
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
+
+                if (currentState === "WAITING_WAVE") {
+                    detectWave(landmarks);
+                } 
+                else if (currentState === "WAITING_OK") {
+                    detectOK(landmarks);
+                }
+                else if (currentState === "WAITING_FOR_DECISION") {
+                    updateNoseHistory(landmarks[0]); 
+                    detectHeadGestures(); 
+                }
+                else if (currentState === "CRYING_TANTRUM") {
+                    detectOK(landmarks);
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        // ==========================================
+        // 4. 动作检测逻辑
+        // ==========================================
+        function detectWave(landmarks) {
+            const wristX = landmarks[15].x; 
+            const diff = Math.abs(wristX - lastWristX);
+            if (diff > 0.05) { 
+                waveCount++;
+            }
+            lastWristX = wristX;
+
+            if (waveCount > 15) {
+                if (currentState === "WAITING_WAVE") {
+                    currentState = "TRANSITION";
+                    pinguContainer.classList.add("waving");
+                    speak("很好！那我们一起来拍张照片吧！请比出一个 OK 的手势！");
+                    setTimeout(() => {
+                        currentState = "WAITING_OK";
+                        waveCount = 0;
+                    }, 4000);
+                } 
+                waveCount = 0; 
+            }
+        }
+
+        function detectOK(landmarks) {
+            const thumbTip = landmarks[21];
+            const indexTip = landmarks[19];
+            if (!thumbTip || !indexTip) return;
+
+            const distance = Math.sqrt(Math.pow(thumbTip.x - indexTip.x, 2) + Math.pow(thumbTip.y - indexTip.y, 2));
+            
+            if (distance < 0.03) {
+                okGestureCount++; 
+                if (okGestureCount > 10) {
+                    if (currentState === "WAITING_OK") {
+                        console.log("检测到OK：拍照");
+                        takePhotoAction();
+                        okGestureCount = 0; 
+                    } 
+                    else if (currentState === "CRYING_TANTRUM" && canRecoverFromCry) {
+                          console.log("检测到OK：从哭泣恢复");
+                          triggerHappyReaction();
+                          okGestureCount = 0; 
+                    }
+                }
+            } else {
+                okGestureCount = 0; 
+            }
+        }
+
+        function updateNoseHistory(noseLandmark) {
+            if (!noseLandmark) return;
+            noseHistory.push({x: noseLandmark.x, y: noseLandmark.y});
+            if (noseHistory.length > historyMaxLength) noseHistory.shift(); 
+        }
+
+        function detectHeadGestures() {
+            if (headGestureCooldown || noseHistory.length < historyMaxLength) return;
+
+            let xMovement = 0;
+            let yMovement = 0;
+            for (let i = 1; i < noseHistory.length; i++) {
+                xMovement += Math.abs(noseHistory[i].x - noseHistory[i-1].x);
+                yMovement += Math.abs(noseHistory[i].y - noseHistory[i-1].y);
+            }
+
+            const shakeThreshold = 0.15; 
+            const nodThreshold = 0.12;   
+
+            if (xMovement > shakeThreshold && xMovement > yMovement * 1.5) {
+                shakeFrameCount++;
+                nodFrameCount = 0;
+                
+                if (shakeFrameCount > requiredGestureFrames) {
+                    triggerHeadAction("SHAKE");
+                    shakeFrameCount = 0;
+                }
+            } 
+            else if (yMovement > nodThreshold && yMovement > xMovement * 1.5) {
+                nodFrameCount++;
+                shakeFrameCount = 0; 
+
+                if (nodFrameCount > requiredGestureFrames) {
+                    triggerHeadAction("NOD");
+                    nodFrameCount = 0; 
+                }
+            } 
+            else {
+                nodFrameCount = 0;
+                shakeFrameCount = 0;
+            }
+        }
+
+        function triggerHeadAction(type) {
+            if (headGestureCooldown) return;
+            headGestureCooldown = true; 
+            setTimeout(() => {
+                headGestureCooldown = false;
+                noseHistory = []; 
+            }, 1000);
+            
+            if (type === "NOD") {
+                if (currentState === "WAITING_FOR_DECISION") {
+                    triggerHappyReaction();
+                } else if (currentState === "CRYING_TANTRUM" && canRecoverFromCry) {
+                    triggerHappyReaction();
+                }
+            } else if (type === "SHAKE") {
+                if (currentState === "WAITING_FOR_DECISION") {
+                    triggerCryingTantrum();
+                }
+            }
+        }
+
+        // ==========================================
+        // 5. 剧情流程控制
+        // ==========================================
+
+        function takePhotoAction(isFinal = false) {
+            if(currentState === "TAKING_PHOTO") return;
+            currentState = "TAKING_PHOTO";
+
+            pinguContainer.classList.remove("waving");
+            
+            if (!isFinal) {
+                pinguChar.src = "pingu_camera.png";
+                speak("三，二，一，茄子！");
+            }
+
+            setTimeout(() => {
+                let shutterSound = new Audio('shutter.mp3');
+                shutterSound.volume = 1.0;
+                shutterSound.play().catch(e=>{});
+
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+                canvasCtx.save();
+                canvasCtx.scale(-1, 1); 
+                canvasCtx.drawImage(videoElement, -canvasElement.width, 0, canvasElement.width, canvasElement.height);
+                canvasCtx.restore();
+
+                const dataURL = canvasElement.toDataURL('image/png');
+                document.getElementById('result-photo').src = dataURL;
+                
+                showPhotoOverlay();
+                
+                if (isFinal) {
+                    if (cheerAudio) {
+                        cheerAudio.volume = 1.0;
+                        cheerAudio.currentTime = 0;
+                        cheerAudio.play().catch(e => {});
+                    }
+                } 
+                else {
+                    if (currentMainAudio) currentMainAudio.pause();
+                    currentMainAudio = new Audio('ending.mp3');
+                    currentMainAudio.volume = 0.6;
+                    currentMainAudio.play();
+
+                    currentMainAudio.onended = () => {
+                        const overlay = document.getElementById('photo-overlay');
+                        overlay.style.display = 'none';
+                        overlay.querySelector('.overlay-content').style.display = 'none';
+
+                        pinguChar.src = "pingu_admire.png";
+                        speak("拍得真好看！");
+
+                        if (performanceTimeout) clearTimeout(performanceTimeout);
+                        performanceTimeout = setTimeout(() => {
+                            pinguChar.src = "pingu_expectant.png";
+                            speak("我可不可以和你们一起再拍一张呀？");
+
+                            console.log("切换状态到：WAITING_FOR_DECISION"); 
+                            pinguContainer.classList.add("stop-breathing");
+                            currentState = "WAITING_FOR_DECISION";
+                            noseHistory = []; 
+                            
+                            currentMainAudio = null;
+                            performanceTimeout = null; 
+                        }, 3000);
+                    };
+                } 
+            }, isFinal ? 0 : 3000); 
+        }
+
+        function triggerHappyReaction() {
+            if(currentState === "FINISHED") return; 
+            currentState = "FINISHED"; 
+            stopCryingTantrum(); 
+
+            pinguChar.src = "pingu_happy.png"; 
+            speak("好耶！"); 
+
+            if (sequenceTimeout) clearTimeout(sequenceTimeout);
+            sequenceTimeout = setTimeout(() => {
+                startTripodSequence();
+            }, 1500);
+        }
+
+        function startTripodSequence() {
+            speak("等我一下哦！");
+            
+            pinguContainer.classList.add("stop-breathing");
+            pinguContainer.style.transition = "transform 5s linear"; 
+
+            const walkFramesLeft = [
+                "pingu_walk_left_1.png", 
+                "pingu_walk_idle.png", 
+                "pingu_walk_left_2.png", 
+                "pingu_walk_mid.png"
+            ];
+            let walkCounter = 0;
+
+            if (walkInterval) clearInterval(walkInterval);
+            walkInterval = setInterval(() => {
+                pinguChar.src = walkFramesLeft[walkCounter];
+                walkCounter = (walkCounter + 1) % walkFramesLeft.length;
+            }, 250); 
+
+            pinguContainer.style.transform = "translateX(-200%)";
+
+            sequenceTimeout = setTimeout(() => {
+                pinguContainer.classList.add("no-transition");
+                clearInterval(walkInterval); 
+                
+                let walkFrameBool = 0;
+                walkInterval = setInterval(() => {
+                    walkFrameBool = !walkFrameBool;
+                    pinguChar.src = walkFrameBool ? "pingu_walk_tripod_1.png" : "pingu_walk_tripod_2.png";
+                }, 400);
+
+                speak("我回来啦！");
+                void pinguContainer.offsetWidth; 
+
+                pinguContainer.classList.remove("no-transition");
+                pinguContainer.style.transition = "transform 5s linear"; 
+                pinguContainer.style.transform = "translateX(0)"; 
+
+                sequenceTimeout = setTimeout(() => {
+                    clearInterval(walkInterval); 
+                    
+                    pinguChar.src = "pingu_place_tripod_1.png";
+                    speak("嘿咻...");
+
+                    sequenceTimeout = setTimeout(() => {
+                        pinguChar.src = "pingu_place_tripod_2.png"; 
+                        
+                        sequenceTimeout = setTimeout(() => {
+                            pinguChar.src = "pingu_idle_tripod.png"; 
+                            pinguContainer.classList.remove("stop-breathing"); 
+
+                            speak("告诉你一个秘密，所有的圣诞树都是我的传送门！");
+
+                            sequenceTimeout = setTimeout(() => {
+                                speak("看到我身后的这棵圣诞树了吗？我等会就会走进去！");
+                                
+                                sequenceTimeout = setTimeout(() => {
+                                    speak("请你也准备好一棵圣诞树，我们一起念出咒语“Merry Christmas!”，我就可以被传送到你身边啦！");
+
+                                    sequenceTimeout = setTimeout(() => {
+                                        speak("那我出发咯！");
+
+                                        sequenceTimeout = setTimeout(() => {
+                                            walkIntoTreeSequence();
+                                        }, 2000);
+
+                                    }, 6000);
+
+                                }, 3500);
+
+                            }, 3000);
+
+                        }, 800);
+                    }, 800);
+
+                }, 5000); 
+
+            }, 5000); 
+        }
+
+        function walkIntoTreeSequence() {
+            console.log("启动：走进传送门流程");
+            
+            stationaryTripod.style.display = "block";
+            pinguContainer.classList.add("stop-breathing");
+            
+            let walkFrame = 0;
+            if (walkInterval) clearInterval(walkInterval);
+            walkInterval = setInterval(() => {
+                walkFrame = !walkFrame;
+                pinguChar.src = walkFrame ? "pingu_back_1.png" : "pingu_back_2.png";
+            }, 250);
+
+            pinguChar.style.transition = "all 3s ease-in";
+            pinguChar.style.transform = "translate(-400px, -220px) scale(0.2)";
+            pinguChar.style.opacity = "0";
+
+            sequenceTimeout = setTimeout(() => {
+                clearInterval(walkInterval); 
+                
+                speak("现在我们一起大声说出传送pingu的咒语吧！");
+
+                sequenceTimeout = setTimeout(() => {
+                    speak("Merry Christmas！");
+                    
+                    if (christmasAudio) {
+                        christmasAudio.volume = 0.6; 
+                        christmasAudio.currentTime = 0;
+                        christmasAudio.play().catch(e => console.log("圣诞音乐播放失败"));
+                    }
+
+                    sequenceTimeout = setTimeout(() => {
+                        speak("我来啦！");
+
+                        sequenceTimeout = setTimeout(() => {
+                            console.log("开始 8秒 停顿...");
+                            
+                            sequenceTimeout = setTimeout(() => {
+                                speak("现在我们一起拍下这张温馨的圣诞合照吧！3，2，1！");
+
+                                sequenceTimeout = setTimeout(() => {
+                                    currentState = ""; 
+                                    takePhotoAction(true); 
+                                }, 3000);
+
+                            }, 8000);
+
+                        }, 2000); 
+
+                    }, 3000); 
+
+                }, 4000); 
+
+            }, 3000);
+        }
+
+        function triggerCryingTantrum() {
+            if (currentState === "CRYING_TANTRUM" || currentState === "FINISHED") return; 
+            currentState = "CRYING_TANTRUM";
+            canRecoverFromCry = false; 
+
+            cryAudio.currentTime = 0;
+            cryAudio.play().catch(e => {});
+            
+            if (cryRecoveryTimeout) clearTimeout(cryRecoveryTimeout);
+            cryRecoveryTimeout = setTimeout(() => { 
+                canRecoverFromCry = true; 
+                cryRecoveryTimeout = null; 
+            }, 4000);
+
+            let isLegUp = false;
+            if (cryInterval) clearInterval(cryInterval);
+            cryInterval = setInterval(() => {
+                pinguChar.src = isLegUp ? "pingu_cry_1.png" : "pingu_cry_2.png";
+                isLegUp = !isLegUp;
+            }, 200);
+        }
+
+        function stopCryingTantrum() {
+            if (cryInterval) clearInterval(cryInterval); 
+            cryAudio.pause(); 
+            cryAudio.currentTime = 0; 
+        }
+
+        function downloadPhoto() {
+            const link = document.createElement('a');
+            link.download = 'pingu_photo.png';
+            link.href = document.getElementById('result-photo').src;
+            link.click();
+        }
+
+        function resetApp() {
+            console.log("重置应用...");
+            
+            if (performanceTimeout) clearTimeout(performanceTimeout);
+            if (cryRecoveryTimeout) clearTimeout(cryRecoveryTimeout);
+            if (happyEndTimeout) clearTimeout(happyEndTimeout);
+            if (sequenceTimeout) clearTimeout(sequenceTimeout);
+            if (walkInterval) clearInterval(walkInterval);
+
+            if (currentMainAudio) {
+                currentMainAudio.pause();
+                currentMainAudio.currentTime = 0;
+            }
+            if (christmasAudio) {
+                christmasAudio.pause();
+                christmasAudio.currentTime = 0;
+            }
+            if (cheerAudio) {
+                cheerAudio.pause();
+                cheerAudio.currentTime = 0;
+            }
+
+            stopCryingTantrum();
+
+            document.getElementById('photo-overlay').style.display = 'none';
+            document.querySelector('.overlay-content').style.display = 'none';
+            bubble.style.opacity = 0;
+
+            stationaryTripod.style.display = "none"; 
+            
+            pinguContainer.classList.add("no-transition");
+            pinguContainer.style.transform = "translateX(0)";
+            void pinguContainer.offsetWidth; 
+            pinguContainer.classList.remove("no-transition");
+            pinguContainer.style.transition = "transform 3s linear";
+            
+            pinguChar.style.transition = "transform 0.2s";
+            pinguChar.style.transform = "none";
+            pinguChar.style.opacity = "1";
+            pinguChar.src = "pingu_idle.png";
+
+            pinguContainer.classList.remove("stop-breathing");
+            pinguContainer.classList.remove("waving");
+
+            currentState = "WAITING_WAVE";
+            waveCount = 0;
+            noseHistory = [];
+            headGestureCooldown = false;
+            canRecoverFromCry = false;
+            okGestureCount = 0;
+            nodFrameCount = 0;
+            shakeFrameCount = 0;
+
+            speak("如果你能看见我，请挥一挥手！");
+        }
+
+        // ==========================================
+        // 7. 初始化 Pose 与 Camera (增强兼容性版 + 国内源优化)
+        // ==========================================
+        const pose = new Pose({locateFile: (file) => {
+            // 【修改点】这里换成了 unpkg.com，加载更稳定
+            return `https://unpkg.com/@mediapipe/pose/${file}`;
+        }});
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        pose.onResults(onResults);
+
+        // 使用自定义初始化逻辑
+        async function startCamera() {
+            statusDiv.innerText = "请求摄像头权限...";
+            speak("你好，正在初始化，请允许使用摄像头。");
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720, facingMode: "user" },
+                    audio: false
+                });
+
+                videoElement.srcObject = stream;
+                
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    statusDiv.innerText = "AI 运行中 | 等待挥手";
+                    currentState = "WAITING_WAVE";
+                    speak("你好，如果你能看见我，请挥一挥你的手！");
+                    
+                    const processFrame = async () => {
+                        if (videoElement.readyState >= 2) {
+                            await pose.send({image: videoElement});
+                        }
+                        requestAnimationFrame(processFrame);
+                    };
+                    processFrame();
+                };
+
+            } catch (err) {
+                console.error("摄像头启动失败:", err);
+                alert("无法启动摄像头。请检查：\n1. 浏览器是否允许摄像头权限。\n2. 电脑是否有其他软件占用了摄像头。\n3. 请使用 Chrome 或 Edge 浏览器。");
+                statusDiv.innerText = "摄像头启动失败: " + err.name;
+            }
+        }
+
+        window.onload = startCamera;
+    </script>
+</body>
+</html>
