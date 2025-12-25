@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>交互式 Pingu 照相机 (网络优化版)</title>
+    <title>交互式 Pingu 照相机 (兼容模式)</title>
     <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -30,8 +30,20 @@
             box-shadow: 0 8px 16px rgba(0,0,0,0.2);
             z-index: 100; background: #000;
         }
-        video, #output_canvas { 
-            width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); 
+        
+        /* 【关键修改】直接显示 video，canvas 只作为透明层覆盖在上面 
+           这样即使 AI 渲染失败，用户也能看到原始摄像头画面，不会黑屏
+        */
+        video {
+            width: 100%; height: 100%; object-fit: cover; 
+            transform: scaleX(-1); /* 镜像翻转 */
+            display: block; /* 确保显示 */
+            position: absolute; top: 0; left: 0; z-index: 1;
+        }
+        #output_canvas { 
+            width: 100%; height: 100%; object-fit: cover; 
+            transform: scaleX(-1); 
+            position: absolute; top: 0; left: 0; z-index: 2; /* 在 video 之上 */
         }
         
         /* Pingu 容器 */
@@ -82,7 +94,7 @@
             left: 20px; 
             width: auto; 
             max-width: 300px; 
-            font-size: 21px; 
+            font-size: 18px; 
             font-weight: bold; 
             color: #333;
             box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
@@ -147,7 +159,7 @@
 <body>
 
     <div id="video-container">
-        <video id="input_video" autoplay playsinline muted></video>
+        <video id="input_video" playsinline muted></video>
         <canvas id="output_canvas"></canvas>
     </div>
 
@@ -189,10 +201,9 @@
         let lastWristX = 0;
         let okGestureCount = 0;
         
-        // 点头摇头的连续计数器
         let nodFrameCount = 0;
         let shakeFrameCount = 0;
-        const requiredGestureFrames = 5; // 需要连续 5 帧检测到动作才触发
+        const requiredGestureFrames = 5; 
 
         // 音频变量
         let cryAudio = new Audio('cry.mp3'); 
@@ -243,18 +254,20 @@
         // 3. 核心检测循环 (Pose)
         // ==========================================
         function onResults(results) {
-            // 一旦有结果，说明 AI 在运行，更新状态
+            // AI 正在运行
             if(currentState === "LOADING") {
                 statusDiv.innerText = "AI 运行中 | 等待挥手";
             }
 
             canvasCtx.save();
+            // 【关键修改】不再在这里绘制视频画面！
+            // 以前：canvasCtx.drawImage(results.image, ...); 这行代码非常吃显卡
+            // 现在：把 Canvas 清空，让它变成透明的。
+            // 这样用户直接看到底层的 <video> 标签，那个非常流畅，不会黑屏。
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             
-            // 绘制画面
-            if (results.image) {
-                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-            }
+            // 我们只在 Canvas 上画关键点（如果需要调试的话，目前不需要）
+            // 或者仅仅用 Canvas 来进行计算，不进行绘制，极大节省性能
             
             if (results.poseLandmarks) {
                 const landmarks = results.poseLandmarks;
@@ -411,10 +424,13 @@
                 shutterSound.volume = 1.0;
                 shutterSound.play().catch(e=>{});
 
+                // 设置 Canvas 尺寸匹配视频
                 canvasElement.width = videoElement.videoWidth;
                 canvasElement.height = videoElement.videoHeight;
                 canvasCtx.save();
                 canvasCtx.scale(-1, 1); 
+                // 【拍照逻辑不变】这里需要手动画一帧，因为拍照时需要生成图片
+                // 平时虽然不画，但拍照这一下必须画
                 canvasCtx.drawImage(videoElement, -canvasElement.width, 0, canvasElement.width, canvasElement.height);
                 canvasCtx.restore();
 
@@ -477,7 +493,7 @@
         }
 
         function startTripodSequence() {
-            speak("等我一下哦！");
+            speak("等我一下哦！(利用新姿势流畅地走)");
             
             pinguContainer.classList.add("stop-breathing");
             pinguContainer.style.transition = "transform 5s linear"; 
@@ -534,7 +550,7 @@
                                 speak("看到我身后的这棵圣诞树了吗？我等会就会走进去！");
                                 
                                 sequenceTimeout = setTimeout(() => {
-                                    speak("请你也准备好一棵圣诞树，我们一起念出咒语“Merry Christmas!”，我就可以被传送到你身边啦！");
+                                    speak("我走进去之后，请你也准备好一棵圣诞树，这样我就可以被传送到你身边啦！");
 
                                     sequenceTimeout = setTimeout(() => {
                                         speak("那我出发咯！");
@@ -571,7 +587,7 @@
             }, 250);
 
             pinguChar.style.transition = "all 3s ease-in";
-            pinguChar.style.transform = "translate(-400px, -220px) scale(0.2)";
+            pinguChar.style.transform = "translate(-120px, -220px) scale(0.2)";
             pinguChar.style.opacity = "0";
 
             sequenceTimeout = setTimeout(() => {
@@ -708,7 +724,6 @@
         // 7. 初始化 Pose 与 Camera (增强兼容性版 + 国内源优化)
         // ==========================================
         const pose = new Pose({locateFile: (file) => {
-            // 【修改点】这里换成了 unpkg.com，加载更稳定
             return `https://unpkg.com/@mediapipe/pose/${file}`;
         }});
         pose.setOptions({
@@ -726,8 +741,10 @@
             speak("你好，正在初始化，请允许使用摄像头。");
 
             try {
+                // 【关键修改】降低分辨率到 640x480
+                // 这能极大减轻显卡负担，是解决黑屏的最有效方法
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: 1280, height: 720, facingMode: "user" },
+                    video: { width: 640, height: 480, facingMode: "user" },
                     audio: false
                 });
 
