@@ -3,33 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pingu 照相机 (极速救急版)</title>
-    <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
-
+    <title>Pingu 照相机 (点击互动版)</title>
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; background: #000; height: 100vh; display: flex; justify-content: center; align-items: flex-end; }
+        body { margin: 0; padding: 0; overflow: hidden; background: #000; height: 100vh; display: flex; justify-content: center; align-items: flex-end; cursor: pointer; }
         
-        /* 【关键】直接显示视频，不做复杂渲染 */
-        #video-container {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;
-        }
-        video {
-            width: 100%; height: 100%; object-fit: cover;
-            /* 如果画面是反的，可以去掉下面这行 */
-            transform: scaleX(-1); 
-            display: block;
-        }
-
-        /* 隐藏 Canvas，只用它在后台偷偷计算，不显示 */
-        #output_canvas { display: none; }
+        /* 视频直接显示，不翻转，保证兼容性 */
+        #video-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        video { width: 100%; height: 100%; object-fit: cover; display: block; }
 
         #pingu-container {
             position: relative; width: auto; height: 90vh;
             display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
             padding-bottom: 5vh; z-index: 10; pointer-events: none;
+            transition: transform 3s linear;
         }
 
         #pingu-character { height: 100%; width: auto; max-width: 90vw; object-fit: contain; }
@@ -40,12 +26,15 @@
             position: fixed; top: 70px; left: 20px; max-width: 300px;
             font-size: 18px; font-weight: bold; color: #333; z-index: 50;
             opacity: 0; transition: opacity 0.5s; font-family: sans-serif;
+            pointer-events: none;
         }
+        #bubble::after { content: ''; position: absolute; top: 100%; left: 30px; border-width: 15px 15px 0 0; border-style: solid; border-color: white transparent transparent transparent; }
 
         #status { 
             position: absolute; top: 20px; left: 20px; 
             color: #fff; background: rgba(0,0,0,0.5); 
-            padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;
+            padding: 8px 15px; border-radius: 20px; font-size: 14px; z-index: 100;
+            pointer-events: none;
         }
 
         #photo-overlay {
@@ -53,9 +42,14 @@
             background: rgba(0,0,0,0.9); display: none; z-index: 200;
             justify-content: center; align-items: center; flex-direction: column;
         }
-        #result-photo { max-width: 80%; max-height: 80%; border: 5px solid white; transform: scaleX(-1); }
-        .btn-group { margin-top: 20px; }
-        button { padding: 12px 25px; font-size: 16px; cursor: pointer; border-radius: 20px; border: none; margin: 0 10px; }
+        #result-photo { max-width: 80%; max-height: 80%; border: 10px solid white; border-radius: 10px; }
+        .btn-group { margin-top: 20px; display: flex; gap: 20px; }
+        button { padding: 15px 40px; font-size: 18px; cursor: pointer; border-radius: 50px; border: none; background: white; font-weight: bold; transition: transform 0.1s; }
+        button:active { transform: scale(0.95); }
+
+        /* 动画类 */
+        @keyframes wave-anim { 0%, 100% { transform: rotate(0deg); } 25% { transform: rotate(-5deg); } 75% { transform: rotate(5deg); } }
+        .waving { animation: wave-anim 1s infinite; }
     </style>
 </head>
 <body>
@@ -64,7 +58,7 @@
         <video id="input_video" playsinline muted></video>
     </div>
     
-    <canvas id="output_canvas"></canvas>
+    <canvas id="capture_canvas" style="display:none;"></canvas>
 
     <div id="pingu-container">
         <img id="pingu-character" src="pingu_idle.png" alt="Pingu">
@@ -72,32 +66,31 @@
     </div>
 
     <div id="bubble">...</div>
-    <div id="status">初始化极速模式...</div>
+    <div id="status">点击屏幕开始互动</div>
 
     <div id="photo-overlay">
         <img id="result-photo" src="">
         <div class="btn-group">
             <button onclick="downloadPhoto()">💾 保存</button>
-            <button onclick="location.reload()">🔄 重来</button>
+            <button onclick="location.reload()">🔄 重玩</button>
         </div>
     </div>
 
     <script>
+        // === 核心逻辑：完全移除 AI，改为点击驱动 ===
         const videoElement = document.getElementById('input_video');
-        const canvasElement = document.getElementById('output_canvas');
-        const canvasCtx = canvasElement.getContext('2d');
         const pinguChar = document.getElementById('pingu-character');
         const stationaryTripod = document.getElementById('stationary-tripod');
+        const pinguContainer = document.getElementById('pingu-container');
         const bubble = document.getElementById('bubble');
         const statusDiv = document.getElementById('status');
-        const pinguContainer = document.getElementById('pingu-container');
         
-        let currentState = "LOADING"; 
-        let waveCount = 0; let lastWristX = 0;
-        let okGestureCount = 0;
-        let noseHistory = []; 
-        let headGestureCooldown = false;
-        let nodFrameCount = 0; let shakeFrameCount = 0;
+        // 流程状态
+        let step = 0; 
+        // 0: 等待开始
+        // 1: 挥手阶段
+        // 2: 等待确认 (搬三脚架)
+        // 3: 动画播放中 (不可点击)
 
         // 音频
         let nootAudio = new Audio('noot.mp3');
@@ -105,123 +98,132 @@
         let christmasAudio = new Audio('merry_christmas.mp3'); christmasAudio.loop = true;
         let cheerAudio = new Audio('cheer.mp3');
         let cryAudio = new Audio('cry.mp3'); cryAudio.loop = true;
+        
+        let walkInterval = null;
 
         function speak(text) {
             bubble.innerText = text;
             bubble.style.opacity = 1;
+            nootAudio.currentTime = 0;
             nootAudio.play().catch(e=>{});
         }
 
-        function onResults(results) {
-            if(currentState === "LOADING") {
-                statusDiv.innerText = "极速模式运行中 | 等待挥手";
-            }
-            // 注意：这里不再进行 canvas 绘图，极大节省性能
-            if (results.poseLandmarks) {
-                const lm = results.poseLandmarks;
-                if (currentState === "WAITING_WAVE") detectWave(lm);
-                else if (currentState === "WAITING_OK") detectOK(lm);
-                else if (currentState === "WAITING_FOR_DECISION") {
-                    updateNose(lm[0]); detectHead();
-                } else if (currentState === "CRYING") {
-                    detectOK(lm);
-                }
-            }
-        }
-
-        function detectWave(lm) {
-            let wristX = lm[15].x;
-            if (Math.abs(wristX - lastWristX) > 0.05) waveCount++;
-            lastWristX = wristX;
-            if (waveCount > 15) {
-                currentState = "TRANSITION";
-                pinguContainer.classList.add("waving"); // 简单的CSS动画
-                speak("看到你啦！请比个 OK 的手势！");
-                setTimeout(() => { currentState = "WAITING_OK"; waveCount = 0; }, 3000);
-            }
-        }
-
-        function detectOK(lm) {
-            let dist = Math.hypot(lm[21].x - lm[19].x, lm[21].y - lm[19].y);
-            if (dist < 0.05) { // 放宽一点判定
-                okGestureCount++;
-                if (okGestureCount > 5) { // 减少判定帧数
-                    if(currentState === "WAITING_OK") takePhoto();
-                    else if(currentState === "CRYING") happyReaction();
-                    okGestureCount = 0;
-                }
-            } else okGestureCount = 0;
-        }
-
-        function updateNose(nose) {
-            if(!nose) return;
-            noseHistory.push(nose);
-            if(noseHistory.length > 10) noseHistory.shift();
-        }
-
-        function detectHead() {
-            if(headGestureCooldown || noseHistory.length < 10) return;
-            let xMove = 0, yMove = 0;
-            for(let i=1; i<noseHistory.length; i++) {
-                xMove += Math.abs(noseHistory[i].x - noseHistory[i-1].x);
-                yMove += Math.abs(noseHistory[i].y - noseHistory[i-1].y);
-            }
-            if(xMove > 0.15 && xMove > yMove * 1.5) {
-                shakeFrameCount++; nodFrameCount = 0;
-                if(shakeFrameCount > 3) triggerAction("SHAKE");
-            } else if(yMove > 0.12 && yMove > xMove * 1.5) {
-                nodFrameCount++; shakeFrameCount = 0;
-                if(nodFrameCount > 3) triggerAction("NOD");
-            } else { shakeFrameCount=0; nodFrameCount=0; }
-        }
-
-        function triggerAction(type) {
-            headGestureCooldown = true;
-            setTimeout(() => { headGestureCooldown = false; noseHistory = []; }, 1000);
-            if(type === "NOD") happyReaction();
-            else if(type === "SHAKE") triggerCrying();
-        }
-
-        function triggerCrying() {
-            if(currentState === "CRYING") return;
-            currentState = "CRYING";
-            pinguChar.src = "pingu_cry_1.png";
-            cryAudio.play().catch(e=>{});
-        }
-
-        function happyReaction() {
-            if(currentState === "FINISHED") return;
-            currentState = "FINISHED";
-            cryAudio.pause(); cryAudio.currentTime=0;
-            pinguChar.src = "pingu_happy.png";
-            speak("好耶！");
-            setTimeout(startSequence, 1500);
-        }
-
-        function startSequence() {
-            // 简化版流程
-            speak("等我一下哦！");
-            pinguContainer.style.transition = "transform 3s linear";
-            pinguContainer.style.transform = "translateX(-200%)"; 
+        // 全局点击事件监听
+        document.body.addEventListener('click', function(e) {
+            // 如果点的是按钮，不触发剧情
+            if(e.target.tagName === 'BUTTON') return;
             
-            setTimeout(() => {
-                pinguContainer.style.transition = "none";
-                pinguContainer.style.transform = "translateX(0)";
-                speak("我回来啦！");
-                stationaryTripod.style.display = "block"; 
-                pinguChar.style.opacity = 0; 
+            nextStoryStep();
+        });
+
+        function nextStoryStep() {
+            if (step === 0) {
+                // 第一步：点击开始，Pingu 挥手
+                step = 1;
+                statusDiv.innerText = "互动中 | 点击屏幕继续";
+                speak("你好！如果你能看见我，请再次点击屏幕！");
+                pinguContainer.classList.add("waving");
+            } 
+            else if (step === 1) {
+                // 第二步：点击确认，Pingu 开心，开始搬三脚架流程
+                step = 3; // 锁定状态，防止乱点
+                statusDiv.innerText = "剧情播放中...";
+                pinguContainer.classList.remove("waving");
                 
-                speak("现在我们一起大声说出传送pingu的咒语吧！");
+                // 播放开心动画
+                pinguChar.src = "pingu_happy.png";
+                speak("好耶！那我们来拍张照吧！");
+                
+                // 1.5秒后开始走路架设三脚架
+                setTimeout(startTripodSequence, 1500);
+            }
+        }
+
+        // --- 以下是完全保留的原版动画逻辑 ---
+
+        function startTripodSequence() {
+            speak("等我一下哦！(去搬三脚架)");
+            
+            pinguContainer.style.transition = "transform 4s linear";
+            pinguContainer.style.transform = "translateX(-200%)"; // 走出屏幕
+
+            // 走路动画
+            const walkFrames = ["pingu_walk_left_1.png", "pingu_walk_idle.png", "pingu_walk_left_2.png", "pingu_walk_mid.png"];
+            let f = 0;
+            walkInterval = setInterval(() => {
+                pinguChar.src = walkFrames[f];
+                f = (f + 1) % 4;
+            }, 200);
+
+            // 4秒后走回来
+            setTimeout(() => {
+                clearInterval(walkInterval);
+                pinguContainer.style.transition = "none";
+                // 瞬间移回右边准备走入
+                // 这里为了简单，直接让它带着三脚架滑回来
+                pinguContainer.style.transform = "translateX(0)";
+                pinguContainer.style.transition = "transform 4s linear";
+                
+                let toggle = false;
+                walkInterval = setInterval(() => {
+                    pinguChar.src = toggle ? "pingu_walk_tripod_1.png" : "pingu_walk_tripod_2.png";
+                    toggle = !toggle;
+                }, 300);
+
+                speak("我回来啦！");
+
+                // 走到位，架设
+                setTimeout(() => {
+                    clearInterval(walkInterval);
+                    pinguChar.src = "pingu_place_tripod_1.png";
+                    speak("嘿咻...");
+                    
+                    setTimeout(() => {
+                        pinguChar.src = "pingu_idle_tripod.png"; 
+                        
+                        // 开始传送门对话
+                        speak("告诉你一个秘密，所有的圣诞树都是我的传送门！");
+                        setTimeout(() => {
+                            speak("我要走进身后的圣诞树传送咯！");
+                            setTimeout(() => {
+                                walkIntoTreeSequence();
+                            }, 3000);
+                        }, 3000);
+                    }, 1000);
+                }, 4000);
+            }, 4000);
+        }
+
+        function walkIntoTreeSequence() {
+            stationaryTripod.style.display = "block"; // 留下三脚架
+            
+            // Pingu 变小走远
+            let toggle = false;
+            walkInterval = setInterval(() => {
+                pinguChar.src = toggle ? "pingu_back_1.png" : "pingu_back_2.png";
+                toggle = !toggle;
+            }, 250);
+
+            pinguChar.style.transition = "all 3s ease-in";
+            pinguChar.style.transform = "translate(-100px, -200px) scale(0.2)";
+            pinguChar.style.opacity = "0";
+
+            setTimeout(() => {
+                clearInterval(walkInterval);
+                speak("现在，大家一起喊出咒语！");
                 
                 setTimeout(() => {
                     speak("Merry Christmas！");
                     christmasAudio.play().catch(e=>{});
+                    
                     setTimeout(() => {
                         speak("我来啦！");
+                        
+                        // 8秒停顿
                         setTimeout(() => {
-                            speak("准备拍照！3，2，1！");
+                            speak("准备好，3，2，1！");
                             setTimeout(() => {
-                                takePhoto(true);
+                                takePhoto();
                             }, 3000);
                         }, 8000);
                     }, 3000);
@@ -229,66 +231,39 @@
             }, 3000);
         }
 
-        function takePhoto(isFinal = false) {
+        function takePhoto() {
             shutterAudio.play();
+            cheerAudio.play();
             
-            // 只有拍照这一瞬间，才使用 canvas 绘制一帧
-            canvasElement.width = videoElement.videoWidth;
-            canvasElement.height = videoElement.videoHeight;
-            canvasCtx.drawImage(videoElement, 0, 0); 
+            // 截图
+            const canvas = document.getElementById('capture_canvas');
+            canvas.width = videoElement.videoWidth;
+            canvas.height = videoElement.videoHeight;
+            const ctx = canvas.getContext('2d');
+            // 不镜像，保持原样
+            ctx.drawImage(videoElement, 0, 0);
             
-            document.getElementById('result-photo').src = canvasElement.toDataURL('image/png');
+            document.getElementById('result-photo').src = canvas.toDataURL('image/png');
             document.getElementById('photo-overlay').style.display = 'flex';
-            
-            if(isFinal) {
-                cheerAudio.play();
-            } else {
-                 speak("拍得真好！");
-                 setTimeout(() => {
-                     document.getElementById('photo-overlay').style.display = 'none';
-                     currentState = "WAITING_FOR_DECISION";
-                     pinguChar.src = "pingu_expectant.png";
-                     speak("再拍一张吗？(点头/摇头)");
-                 }, 3000);
-            }
         }
-        
+
         function downloadPhoto() {
             const a = document.createElement('a');
-            a.download = 'pingu.png';
+            a.download = 'pingu_photo.png';
             a.href = document.getElementById('result-photo').src;
             a.click();
         }
 
-        // 初始化
-        const pose = new Pose({locateFile: (file) => `https://unpkg.com/@mediapipe/pose/${file}`});
-        // 【极速版核心设置】modelComplexity: 0 (超轻量模型)，0 是最快最不吃配置的
-        pose.setOptions({ 
-            modelComplexity: 0, 
-            smoothLandmarks: true, 
-            enableSegmentation: false, 
-            minDetectionConfidence: 0.5, 
-            minTrackingConfidence: 0.5 
-        });
-        pose.onResults(onResults);
-
-        // 使用最低分辨率 640x480 以保证流畅
-        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false })
+        // 初始化摄像头
+        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false })
             .then(stream => {
                 videoElement.srcObject = stream;
-                videoElement.onloadedmetadata = () => {
-                    videoElement.play();
-                    
-                    const loop = async () => {
-                        await pose.send({image: videoElement});
-                        requestAnimationFrame(loop);
-                    };
-                    loop();
-                };
+                videoElement.play();
             })
             .catch(err => {
-                alert("摄像头启动失败: " + err);
+                alert("摄像头无法启动，请检查权限。");
             });
+
     </script>
 </body>
 </html>
